@@ -1,12 +1,16 @@
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
 #endif
 
 namespace EcholocationGame
 {
     [RequireComponent(typeof(CharacterController))]
     public class EcholocationPlayerController : MonoBehaviour
+#if ENABLE_INPUT_SYSTEM
+        , InputSystem_Actions.IPlayerActions
+#endif
     {
         public enum ThrowableShape
         {
@@ -15,15 +19,23 @@ namespace EcholocationGame
             SegitigaKecil = 2
         }
 
+        [Header("Resonance Echo - Input System Connection")]
+        [Tooltip("Terhubung otomatis dengan script Rightjoystick.cs dan InputSystem_Actions.cs")]
+        public Rightjoystick rightJoystick;
+
         [Header("Movement Settings")]
         public float walkSpeed = 4.5f;
         public float sprintSpeed = 7.5f;
         public float jumpHeight = 1.45f;
         public float gravity = -19.6f;
 
-        [Header("Camera Look Settings")]
+        [Header("Camera Look Settings (Mouse & Gamepad)")]
         public Transform playerCamera;
         public float mouseSensitivity = 0.16f;
+        [Tooltip("Kecepatan putar kamera saat menggunakan Analog Kanan Gamepad / Twin USB Joystick (derajat/detik)")]
+        public float gamepadLookSensitivity = 130f;
+        public float gamepadDeadzone = 0.15f;
+        public bool invertGamepadY = false;
         public float maxLookPitch = 85f;
 
         [Header("Footstep Echolocation Settings")]
@@ -66,6 +78,22 @@ namespace EcholocationGame
         private bool _showHud = true;
         private float _displayedIndicatorValue = 0f;
 
+#if ENABLE_INPUT_SYSTEM
+        private InputSystem_Actions _inputActions;
+#endif
+        // State dari InputSystem_Actions & Rightjoystick
+        private Vector2 _actionMoveInput;
+        private Vector2 _actionLookInput;
+        private bool _actionLookIsMouse;
+        private Vector2 _rightJoystickInput;
+        private bool _actionSprintHeld;
+        private bool _actionJumpQueued;
+        private bool _actionThrowPressedThisFrame;
+        private bool _actionThrowHeld;
+        private bool _actionThrowReleasedThisFrame;
+        private bool _actionPingQueued;
+        private float _lastShapeSwitchTime = -10f;
+
         private void Awake()
         {
             _controller = GetComponent<CharacterController>();
@@ -86,6 +114,24 @@ namespace EcholocationGame
                 }
             }
 
+            // Hubungkan dengan script Rightjoystick.cs dari package dosen
+            if (rightJoystick == null)
+            {
+                rightJoystick = GetComponent<Rightjoystick>();
+                if (rightJoystick == null)
+                {
+                    rightJoystick = gameObject.AddComponent<Rightjoystick>();
+                }
+            }
+            rightJoystick.echoPlayer = this;
+            rightJoystick.deadzone = gamepadDeadzone;
+
+#if ENABLE_INPUT_SYSTEM
+            // Hubungkan dengan script InputSystem_Actions.cs dari package dosen
+            _inputActions = new InputSystem_Actions();
+            _inputActions.Player.AddCallbacks(this);
+#endif
+
             // Pantulan tinggi agar objek yang dilempar bisa memantul berkali-kali dan echolocationnya makin mengecil
             _throwablePhysicsMat = new PhysicsMaterial("ThrowableBounce")
             {
@@ -97,6 +143,32 @@ namespace EcholocationGame
             };
 
             BuildHandViewModel();
+        }
+
+        private void OnEnable()
+        {
+#if ENABLE_INPUT_SYSTEM
+            _inputActions?.Player.Enable();
+#endif
+        }
+
+        private void OnDisable()
+        {
+#if ENABLE_INPUT_SYSTEM
+            _inputActions?.Player.Disable();
+#endif
+        }
+
+        private void OnDestroy()
+        {
+#if ENABLE_INPUT_SYSTEM
+            if (_inputActions != null)
+            {
+                _inputActions.Player.RemoveCallbacks(this);
+                _inputActions.Dispose();
+                _inputActions = null;
+            }
+#endif
         }
 
         private void Start()
@@ -113,7 +185,7 @@ namespace EcholocationGame
         private void Update()
         {
             HandleCursorAndHudInput();
-            HandleMouseLook();
+            HandleCameraLook();
             HandleMovementAndFootsteps();
             HandleThrowAndPingInput();
             UpdateHandViewModelAnimation();
@@ -125,6 +197,134 @@ namespace EcholocationGame
                     EcholocationManager.Instance.indicatorValue,
                     Time.deltaTime * 12f);
             }
+
+            // Reset one-frame action flags
+            _actionJumpQueued = false;
+            _actionThrowPressedThisFrame = false;
+            _actionThrowReleasedThisFrame = false;
+            _actionPingQueued = false;
+        }
+
+        /// <summary>
+        /// Dipanggil oleh Rightjoystick.cs setiap frame untuk mengirimkan input analog kanan (Z & ZR / RightStick).
+        /// </summary>
+        public void SetRightJoystickInput(Vector2 lookVector)
+        {
+            _rightJoystickInput = lookVector;
+        }
+
+        #region InputSystem_Actions.IPlayerActions & PlayerInput Callbacks
+
+#if ENABLE_INPUT_SYSTEM
+        public void OnMove(InputAction.CallbackContext context)
+        {
+            _actionMoveInput = context.canceled ? Vector2.zero : context.ReadValue<Vector2>();
+        }
+
+        public void OnLook(InputAction.CallbackContext context)
+        {
+            if (context.canceled)
+            {
+                _actionLookInput = Vector2.zero;
+                return;
+            }
+
+            _actionLookInput = context.ReadValue<Vector2>();
+            _actionLookIsMouse = context.control?.device is Pointer;
+        }
+
+        public void OnAttack(InputAction.CallbackContext context)
+        {
+            if (context.started)
+            {
+                _actionThrowPressedThisFrame = true;
+                _actionThrowHeld = true;
+            }
+            else if (context.performed && !_actionThrowHeld)
+            {
+                _actionThrowPressedThisFrame = true;
+                _actionThrowHeld = true;
+            }
+            else if (context.canceled)
+            {
+                _actionThrowHeld = false;
+                _actionThrowReleasedThisFrame = true;
+            }
+        }
+
+        public void OnInteract(InputAction.CallbackContext context)
+        {
+            if (context.started || context.performed)
+            {
+                _actionPingQueued = true;
+            }
+        }
+
+        public void OnCrouch(InputAction.CallbackContext context)
+        {
+            if (context.performed)
+            {
+                _showHud = !_showHud;
+            }
+        }
+
+        public void OnJump(InputAction.CallbackContext context)
+        {
+            if (context.started || context.performed)
+            {
+                _actionJumpQueued = true;
+            }
+        }
+
+        public void OnPrevious(InputAction.CallbackContext context)
+        {
+            if (context.performed && Time.time - _lastShapeSwitchTime > 0.15f)
+            {
+                _lastShapeSwitchTime = Time.time;
+                CycleThrowableShape(-1);
+            }
+        }
+
+        public void OnNext(InputAction.CallbackContext context)
+        {
+            if (context.performed && Time.time - _lastShapeSwitchTime > 0.15f)
+            {
+                _lastShapeSwitchTime = Time.time;
+                CycleThrowableShape(1);
+            }
+        }
+
+        public void OnSprint(InputAction.CallbackContext context)
+        {
+            _actionSprintHeld = !context.canceled && context.ReadValueAsButton();
+        }
+
+        // Alias callback agar juga kompatibel jika dihubungkan lewat komponen PlayerInput seperti di PlayerMovement.cs / Rightjoystick.cs
+        public void OnAksi(InputAction.CallbackContext context) => OnJump(context);
+        public void OnTembak(InputAction.CallbackContext context) => OnAttack(context);
+
+        public void OnZAxis(InputAction.CallbackContext context)
+        {
+            if (rightJoystick != null) rightJoystick.OnZAxis(context);
+        }
+
+        public void OnZRAxis(InputAction.CallbackContext context)
+        {
+            if (rightJoystick != null) rightJoystick.OnZRAxis(context);
+        }
+
+        public void OnZrAxis(InputAction.CallbackContext context)
+        {
+            if (rightJoystick != null) rightJoystick.OnZRAxis(context);
+        }
+#endif
+
+        #endregion
+
+        private void CycleThrowableShape(int direction)
+        {
+            int next = ((int)currentThrowShape + (direction > 0 ? 1 : 2)) % 3;
+            SetThrowableShape((ThrowableShape)next);
         }
 
         private void HandleCursorAndHudInput()
@@ -150,28 +350,58 @@ namespace EcholocationGame
             if (mouse != null)
             {
                 float scroll = mouse.scroll.ReadValue().y;
-                if (Mathf.Abs(scroll) > 0.1f)
+                if (Mathf.Abs(scroll) > 0.1f && Time.time - _lastShapeSwitchTime > 0.12f)
                 {
-                    int next = ((int)currentThrowShape + (scroll > 0 ? 1 : 2)) % 3;
-                    SetThrowableShape((ThrowableShape)next);
+                    _lastShapeSwitchTime = Time.time;
+                    CycleThrowableShape(scroll > 0 ? 1 : -1);
                 }
             }
 #endif
         }
 
-        private void HandleMouseLook()
+        private void HandleCameraLook()
         {
-            if (Cursor.lockState != CursorLockMode.Locked || playerCamera == null) return;
+            if (playerCamera == null) return;
 
-            Vector2 lookDelta = Vector2.zero;
+            float yaw = 0f;
+            float pitch = 0f;
+
 #if ENABLE_INPUT_SYSTEM
-            if (Mouse.current != null)
+            // 1. Input Mouse (ketika kursor terkunci)
+            if (Cursor.lockState == CursorLockMode.Locked && Mouse.current != null)
             {
-                lookDelta = Mouse.current.delta.ReadValue();
+                Vector2 mouseDelta = Mouse.current.delta.ReadValue();
+                yaw += mouseDelta.x * mouseSensitivity;
+                pitch += mouseDelta.y * mouseSensitivity;
+            }
+
+            // 2. Input Analog Kanan dari Rightjoystick.cs (Twin USB Gamepad Z/ZR & Gamepad RightStick)
+            //    serta OnLook dari InputSystem_Actions.cs
+            Vector2 stickLook = _rightJoystickInput;
+            if (rightJoystick != null)
+            {
+                Vector2 rj = rightJoystick.GetRightStickLook(gamepadDeadzone);
+                if (rj.sqrMagnitude > stickLook.sqrMagnitude)
+                {
+                    stickLook = rj;
+                }
+            }
+
+            if (!_actionLookIsMouse && _actionLookInput.magnitude >= gamepadDeadzone)
+            {
+                if (_actionLookInput.sqrMagnitude > stickLook.sqrMagnitude)
+                {
+                    stickLook = _actionLookInput;
+                }
+            }
+
+            if (stickLook.sqrMagnitude > 0.0001f)
+            {
+                float ySign = invertGamepadY ? -1f : 1f;
+                yaw += stickLook.x * gamepadLookSensitivity * Time.deltaTime;
+                pitch += (stickLook.y * ySign) * gamepadLookSensitivity * Time.deltaTime;
             }
 #endif
-            float yaw = lookDelta.x * mouseSensitivity;
-            float pitch = lookDelta.y * mouseSensitivity;
 
             _cameraPitch = Mathf.Clamp(_cameraPitch - pitch, -maxLookPitch, maxLookPitch);
             playerCamera.localRotation = Quaternion.Euler(_cameraPitch, 0f, 0f);
@@ -209,24 +439,57 @@ namespace EcholocationGame
                 _velocity.y = -2f;
             }
 
-            Vector2 moveInput = Vector2.zero;
-            bool isSprinting = false;
-            bool jumpPressed = false;
+            // Ambil input gerak dari InputSystem_Actions (OnMove: Gamepad Left Stick, Twin USB Stick, atau WASD)
+            Vector2 moveInput = _actionMoveInput;
+            bool isSprinting = _actionSprintHeld;
+            bool jumpPressed = _actionJumpQueued;
 
 #if ENABLE_INPUT_SYSTEM
+            // Fallback langsung ke Keyboard, Gamepad, dan Joystick jika ada kontroler tambahan
             var kb = Keyboard.current;
             if (kb != null)
             {
-                if (kb.wKey.isPressed || kb.upArrowKey.isPressed) moveInput.y += 1f;
-                if (kb.sKey.isPressed || kb.downArrowKey.isPressed) moveInput.y -= 1f;
-                if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) moveInput.x += 1f;
-                if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) moveInput.x -= 1f;
+                Vector2 kbMove = Vector2.zero;
+                if (kb.wKey.isPressed || kb.upArrowKey.isPressed) kbMove.y += 1f;
+                if (kb.sKey.isPressed || kb.downArrowKey.isPressed) kbMove.y -= 1f;
+                if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) kbMove.x += 1f;
+                if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) kbMove.x -= 1f;
+                if (kbMove.sqrMagnitude > moveInput.sqrMagnitude) moveInput = kbMove;
 
-                isSprinting = kb.leftShiftKey.isPressed;
-                jumpPressed = kb.spaceKey.wasPressedThisFrame;
+                isSprinting |= kb.leftShiftKey.isPressed;
+                jumpPressed |= kb.spaceKey.wasPressedThisFrame;
+            }
+
+            var gp = Gamepad.current;
+            if (gp != null)
+            {
+                Vector2 gpMove = gp.leftStick.ReadValue();
+                if (gpMove.magnitude >= gamepadDeadzone && gpMove.sqrMagnitude > moveInput.sqrMagnitude)
+                {
+                    moveInput = gpMove;
+                }
+                isSprinting |= gp.leftStickButton.isPressed;
+                jumpPressed |= gp.buttonSouth.wasPressedThisFrame;
+            }
+
+            var js = Joystick.current;
+            if (js != null)
+            {
+                Vector2 jsMove = js.stick.ReadValue();
+                if (jsMove.magnitude >= gamepadDeadzone && jsMove.sqrMagnitude > moveInput.sqrMagnitude)
+                {
+                    moveInput = jsMove;
+                }
+                isSprinting |= IsJoystickButtonPressed(js, "button6") || IsJoystickButtonPressed(js, "button5");
+                jumpPressed |= WasJoystickButtonPressedThisFrame(js, "button2");
             }
 #endif
-            if (moveInput.sqrMagnitude > 1f)
+
+            if (moveInput.magnitude < gamepadDeadzone)
+            {
+                moveInput = Vector2.zero;
+            }
+            else if (moveInput.sqrMagnitude > 1f)
             {
                 moveInput.Normalize();
             }
@@ -284,14 +547,16 @@ namespace EcholocationGame
 
         private void HandleThrowAndPingInput()
         {
-            bool throwDown = false;
-            bool throwHeld = false;
-            bool throwUp = false;
-            bool manualPingDown = false;
+            bool throwDown = _actionThrowPressedThisFrame;
+            bool throwHeld = _actionThrowHeld;
+            bool throwUp = _actionThrowReleasedThisFrame;
+            bool manualPingDown = _actionPingQueued;
 
 #if ENABLE_INPUT_SYSTEM
             var mouse = Mouse.current;
             var kb = Keyboard.current;
+            var gp = Gamepad.current;
+            var js = Joystick.current;
 
             if (mouse != null)
             {
@@ -313,6 +578,39 @@ namespace EcholocationGame
                 throwHeld |= kb.fKey.isPressed;
                 throwUp |= kb.fKey.wasReleasedThisFrame;
                 manualPingDown |= kb.qKey.wasPressedThisFrame;
+            }
+
+            if (gp != null)
+            {
+                bool gpAttackDown = gp.buttonWest.wasPressedThisFrame || gp.rightTrigger.wasPressedThisFrame;
+                bool gpAttackHeld = gp.buttonWest.isPressed || gp.rightTrigger.isPressed;
+                bool gpAttackUp = gp.buttonWest.wasReleasedThisFrame || gp.rightTrigger.wasReleasedThisFrame;
+
+                throwDown |= gpAttackDown;
+                throwHeld |= gpAttackHeld;
+                throwUp |= gpAttackUp;
+                manualPingDown |= gp.buttonNorth.wasPressedThisFrame;
+            }
+
+            if (js != null)
+            {
+                bool jsAttackDown = js.trigger.wasPressedThisFrame
+                    || WasJoystickButtonPressedThisFrame(js, "button3")
+                    || WasJoystickButtonPressedThisFrame(js, "button4")
+                    || WasJoystickButtonPressedThisFrame(js, "button8");
+                bool jsAttackHeld = js.trigger.isPressed
+                    || IsJoystickButtonPressed(js, "button3")
+                    || IsJoystickButtonPressed(js, "button4")
+                    || IsJoystickButtonPressed(js, "button8");
+                bool jsAttackUp = js.trigger.wasReleasedThisFrame
+                    || WasJoystickButtonReleasedThisFrame(js, "button3")
+                    || WasJoystickButtonReleasedThisFrame(js, "button4")
+                    || WasJoystickButtonReleasedThisFrame(js, "button8");
+
+                throwDown |= jsAttackDown;
+                throwHeld |= jsAttackHeld;
+                throwUp |= jsAttackUp;
+                manualPingDown |= WasJoystickButtonPressedThisFrame(js, "button1");
             }
 #endif
 
@@ -336,6 +634,23 @@ namespace EcholocationGame
                 EcholocationManager.Instance.EmitFootstepPulse(GetFootPosition(), true);
             }
         }
+
+#if ENABLE_INPUT_SYSTEM
+        private static bool IsJoystickButtonPressed(Joystick js, string buttonName)
+        {
+            return js != null && js.TryGetChildControl<ButtonControl>(buttonName) is ButtonControl btn && btn.isPressed;
+        }
+
+        private static bool WasJoystickButtonPressedThisFrame(Joystick js, string buttonName)
+        {
+            return js != null && js.TryGetChildControl<ButtonControl>(buttonName) is ButtonControl btn && btn.wasPressedThisFrame;
+        }
+
+        private static bool WasJoystickButtonReleasedThisFrame(Joystick js, string buttonName)
+        {
+            return js != null && js.TryGetChildControl<ButtonControl>(buttonName) is ButtonControl btn && btn.wasReleasedThisFrame;
+        }
+#endif
 
         private void ThrowSmallObject(float force)
         {
@@ -523,6 +838,21 @@ namespace EcholocationGame
             Cursor.visible = !locked;
         }
 
+        private string GetConnectedControllerStatus()
+        {
+#if ENABLE_INPUT_SYSTEM
+            if (Gamepad.current != null)
+            {
+                return $"Gamepad Aktif ({Gamepad.current.displayName})";
+            }
+            if (Joystick.current != null)
+            {
+                return $"USB Gamepad Aktif ({Joystick.current.displayName})";
+            }
+#endif
+            return "Keyboard & Mouse (Colok Gamepad untuk langsung pakai)";
+        }
+
         private void OnGUI()
         {
             DrawEcholocationIndicatorBar();
@@ -556,22 +886,22 @@ namespace EcholocationGame
             };
 
             string info =
-                "<b>ECHOLOCATION PROTOTYPE</b>\n" +
-                "• <b>WASD / Shift</b> : Melangkah (Echolocation Kecil)\n" +
-                "• <b>Space</b> : Lompat (Echolocation Besar Saat Mendarat di Tanah)\n" +
-                "• <b>Klik Kiri / F</b> : Lempar Objek Kecil (Echolocation Saat Tertabrak, Makin Kecil Tiap Pantulan)\n" +
-                "• <b>1 / 2 / 3 / Scroll</b> : Ganti Bentuk Lemparan [" + shapeName + "]\n" +
-                "• <b>Monster Merah</b> : Mengejar Titik Lokasi Echolocation!\n" +
-                "• <b>H</b> : Sembunyikan HUD | <b>Esc</b> : Kursor";
+                "<b>RESONANCE ECHO</b>  <color=#88FFAA>[" + GetConnectedControllerStatus() + "]</color>\n" +
+                "• <b>Analog Kiri / WASD</b> : Melangkah | <b>L3 / R1 (Btn6) / Shift</b> : Lari\n" +
+                "• <b>Analog Kanan (Z/ZR) / Mouse</b> : Putar Kamera\n" +
+                "• <b>Tombol Bawah (Cross/A/Btn2) / Space</b> : Lompat (Echo Saat Mendarat)\n" +
+                "• <b>Kotak (X/Btn3) / R2 / Klik Kiri / F</b> : Tahan & Lepas Lempar Objek\n" +
+                "• <b>D-Pad Kiri-Kanan / L1-R1 / 1-2-3</b> : Ganti Objek [" + shapeName + "]\n" +
+                "• <b>Segitiga (Y/Btn1) / Q</b> : Ping Manual | <b>Bulat (B) / H</b> : HUD";
 
-            GUI.color = new Color(0f, 0f, 0f, 0.72f);
-            GUI.Box(new Rect(14, 14, 520, 142), "");
+            GUI.color = new Color(0f, 0f, 0f, 0.74f);
+            GUI.Box(new Rect(14, 14, 555, 158), "");
             GUI.color = Color.white;
-            GUI.Label(new Rect(24, 20, 505, 134), info, new GUIStyle(GUI.skin.label)
+            GUI.Label(new Rect(24, 20, 540, 148), info, new GUIStyle(GUI.skin.label)
             {
                 richText = true,
                 fontSize = 13,
-                normal = { textColor = new Color(0.92f, 0.92f, 0.92f, 0.9f) }
+                normal = { textColor = new Color(0.92f, 0.92f, 0.92f, 0.92f) }
             });
 
             // Crosshair dot in center
@@ -597,7 +927,7 @@ namespace EcholocationGame
             float maxVal = EcholocationManager.Instance != null ? EcholocationManager.Instance.maxIndicatorValue : 100f;
             float norm = Mathf.Clamp01(_displayedIndicatorValue / Mathf.Max(1f, maxVal));
 
-            float barWidth = 360f;
+            float barWidth = 380f;
             float barHeight = 16f;
             float x = (Screen.width - barWidth) * 0.5f;
             float y = 24f;
@@ -620,17 +950,17 @@ namespace EcholocationGame
             if (norm < 0.15f)
             {
                 fillCol = new Color(0.85f, 0.85f, 0.85f, 0.9f);
-                statusText = "ECHOLOCATION INDICATOR: TENANG (Monster Patroli)";
+                statusText = "RESONANCE ECHO: TENANG (Monster Patroli)";
             }
             else if (norm < 0.55f)
             {
                 fillCol = Color.Lerp(new Color(1f, 0.85f, 0.2f, 1f), new Color(1f, 0.45f, 0.1f, 1f), (norm - 0.15f) / 0.4f);
-                statusText = "ECHOLOCATION INDICATOR: WASPADA (Monster Mendekati Sumber Suara!)";
+                statusText = "RESONANCE ECHO: WASPADA (Monster Mendekati Sumber Suara!)";
             }
             else
             {
                 fillCol = new Color(1f, 0.12f, 0.12f, 1f);
-                statusText = "ECHOLOCATION INDICATOR: BAHAYA! (Monster Mengejar Titik Echolocation!)";
+                statusText = "RESONANCE ECHO: BAHAYA! (Monster Mengejar Titik Suara!)";
             }
 
             GUI.color = fillCol;

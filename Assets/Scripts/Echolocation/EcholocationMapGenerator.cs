@@ -116,7 +116,17 @@ namespace EcholocationGame
         public void EnsurePlayerSetup()
         {
             EcholocationPlayerController player = FindFirstObjectByType<EcholocationPlayerController>();
-            if (player != null) return;
+            if (player != null)
+            {
+                Rightjoystick existingRj = player.GetComponent<Rightjoystick>();
+                if (existingRj == null)
+                {
+                    existingRj = player.gameObject.AddComponent<Rightjoystick>();
+                }
+                existingRj.echoPlayer = player;
+                player.rightJoystick = existingRj;
+                return;
+            }
 
             GameObject playerObj = GameObject.Find("EcholocationPlayer");
             if (playerObj == null)
@@ -161,6 +171,14 @@ namespace EcholocationGame
                 player = playerObj.AddComponent<EcholocationPlayerController>();
             }
             player.playerCamera = mainCam.transform;
+
+            Rightjoystick rj = playerObj.GetComponent<Rightjoystick>();
+            if (rj == null)
+            {
+                rj = playerObj.AddComponent<Rightjoystick>();
+            }
+            rj.echoPlayer = player;
+            player.rightJoystick = rj;
         }
 
         public void BuildPrimitiveMap()
